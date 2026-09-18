@@ -64,9 +64,10 @@ def get_data(symbol, interval="1m", limit=100):
             "volume": float(x[5]),
         })
 
-
     return candles
-    def atr(candles, period=14):
+
+
+def atr(candles, period=14):
     if len(candles) < period + 1:
         return None
 
@@ -86,7 +87,9 @@ def get_data(symbol, interval="1m", limit=100):
         values.append(true_range)
 
     return sum(values[-period:]) / period
-    def rsi(candles, period=14):
+
+
+def rsi(candles, period=14):
     if len(candles) < period + 1:
         return None
 
@@ -400,3 +403,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
