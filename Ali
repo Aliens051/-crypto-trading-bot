@@ -1,0 +1,33 @@
+import json
+import urllib.request
+import urllib.error
+
+url = "https://fapi.asterdex.com/fapi/v1/klines?symbol=BTCUSDT&interval=1m&limit=5"
+
+print("ASTER TEST START")
+
+try:
+    with urllib.request.urlopen(url, timeout=15) as response:
+        body = response.read().decode("utf-8")
+
+        print("HTTP STATUS:", response.status)
+        print("RESPONSE:", body[:1000])
+
+        data = json.loads(body)
+
+        if isinstance(data, list) and len(data) > 0:
+            print("ASTER TEST SUCCESS")
+        else:
+            print("ASTER TEST FAILED: unexpected response")
+
+except urllib.error.HTTPError as error:
+    body = error.read().decode("utf-8", errors="replace")
+
+    print("ASTER HTTP ERROR")
+    print("STATUS:", error.code)
+    print("BODY:", body[:1000])
+
+except Exception as error:
+    print("ASTER REQUEST ERROR:", repr(error))
+
+print("ASTER TEST END")
