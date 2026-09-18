@@ -29,8 +29,18 @@ def get_data(symbol, interval="1m", limit=100):
         f"?symbol={symbol}&interval={interval}&limit={limit}"
     )
 
-    with urllib.request.urlopen(url, timeout=10) as response:
-        data = json.loads(response.read().decode())
+    try:
+        with urllib.request.urlopen(url, timeout=10) as response:
+            status = response.status
+            body = response.read().decode()
+
+        print("BINANCE TEST:", symbol, "| HTTP:", status)
+
+        data = json.loads(body)
+
+    except Exception as error:
+        print("BINANCE REQUEST ERROR:", symbol, "|", repr(error))
+        raise
 
     candles = []
 
@@ -44,9 +54,6 @@ def get_data(symbol, interval="1m", limit=100):
         })
 
     return candles
-
-
-def atr(candles, period=14):
     if len(candles) < period + 1:
         return None
 
