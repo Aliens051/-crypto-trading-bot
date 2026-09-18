@@ -1,6 +1,7 @@
 import json
 import time
 import urllib.request
+import urllib.error
 from datetime import datetime, timezone
 
 STARTING_BALANCE = 100.0
@@ -38,6 +39,16 @@ def get_data(symbol, interval="1m", limit=100):
 
         data = json.loads(body)
 
+    except urllib.error.HTTPError as error:
+        body = error.read().decode("utf-8", errors="replace")
+
+        print("BINANCE HTTP ERROR:", symbol)
+        print("HTTP STATUS:", error.code)
+        print("HEADERS:", dict(error.headers))
+        print("BODY:", body[:500])
+
+        raise
+
     except Exception as error:
         print("BINANCE REQUEST ERROR:", symbol, "|", repr(error))
         raise
@@ -52,6 +63,7 @@ def get_data(symbol, interval="1m", limit=100):
             "close": float(x[4]),
             "volume": float(x[5]),
         })
+
 
     return candles
     if len(candles) < period + 1:
