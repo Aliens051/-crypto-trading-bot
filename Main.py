@@ -1,20 +1,36 @@
 import json
+import math
+import os
+import threading
 import time
-import urllib.request
 import urllib.error
-from datetime import datetime, timezone
+import urllib.parse
+import urllib.request
+from decimal import Decimal, ROUND_DOWN
+
+from eth_account import Account
+from eth_account.messages import encode_typed_data
 
 
 # ============================================================
-# SETTINGS
+# ASTER FUTURES V3 — TESTNET ONLY
 # ============================================================
+
+ASTER_BASE_URL = "https://fapi.asterdex-testnet.com"
+CHAIN_ID = 714
+VERIFYING_CONTRACT = "0x0000000000000000000000000000000000000000"
+
+ASTER_USER_ADDRESS = os.getenv("ASTER_USER_ADDRESS", "").strip()
+ASTER_API_WALLET = os.getenv("ASTER_API_WALLET", "").strip()
+ASTER_API_PRIVATE_KEY = os.getenv("ASTER_API_PRIVATE_KEY", "").strip()
 
 STARTING_BALANCE = 100.0
 RISK_PER_TRADE = 0.10
 MAX_LEVERAGE = 20
 MAX_POSITIONS = 6
 
-ASTER_BASE_URL = "https://fapi.asterdex.com"
+SCAN_INTERVAL_SECONDS = 60
+KLINE_LIMIT = 120
 
 SYMBOLS = [
     "BTCUSDT",
@@ -27,555 +43,521 @@ SYMBOLS = [
     "LINKUSDT",
 ]
 
-positions = {}
-balance = STARTING_BALANCE
+# Strategy parameters kept from the existing bot.
+TAKE_PROFIT_PCT = 0.015
+STOP_LOSS_PCT = 0.008
+
+NONCE_LOCK = threading.Lock()
+LAST_NONCE = 0
 
 
 # ============================================================
-# ASTER MARKET DATA
+# BASIC HTTP
 # ============================================================
 
-def get_data(symbol, interval="1m", limit=100):
+def http_json(url, method="GET", data=None, timeout=20):
+    headers = {
+        "User-Agent": "AsterDemoTradingBot/1.0",
+        "Accept": "application/json",
+    }
 
-    url = (
-        f"{ASTER_BASE_URL}/fapi/v1/klines"
-        f"?symbol={symbol}"
-        f"&interval={interval}"
-        f"&limit={limit}"
+    body = None
+    if data is not None:
+        headers["Content-Type"] = "application/x-www-form-urlencoded"
+        body = urllib.parse.urlencode(data).encode()
+
+    request = urllib.request.Request(
+        url,
+        data=body,
+        headers=headers,
+        method=method,
     )
 
     try:
-        request = urllib.request.Request(
-            url,
-            headers={
-                "User-Agent": "Mozilla/5.0",
-                "Accept": "application/json",
-            },
-        )
+        with urllib.request.urlopen(request, timeout=timeout) as response:
+            raw = response.read().decode()
+            return json.loads(raw)
+    except urllib.error.HTTPError as exc:
+        raw = exc.read().decode(errors="replace")
+        try:
+            payload = json.loads(raw)
+        except Exception:
+            payload = {"code": exc.code, "msg": raw}
+        raise RuntimeError(f"Aster HTTP {exc.code}: {payload}") from exc
+    except urllib.error.URLError as exc:
+        raise RuntimeError(f"Network error: {exc}") from exc
 
-        with urllib.request.urlopen(request, timeout=15) as response:
 
-            status = response.status
-            body = response.read().decode("utf-8")
-
-        if status != 200:
-            raise RuntimeError(
-                f"Aster HTTP {status}: {body[:500]}"
-            )
-
-        data = json.loads(body)
-
-        if not isinstance(data, list):
-            raise RuntimeError(
-                f"Unexpected Aster response: {data}"
-            )
-
-        candles = []
-
-        for x in data:
-
-            if len(x) < 6:
-                continue
-
-            candles.append({
-                "open": float(x[1]),
-                "high": float(x[2]),
-                "low": float(x[3]),
-                "close": float(x[4]),
-                "volume": float(x[5]),
-            })
-
-        if not candles:
-            raise RuntimeError(
-                f"No candle data returned for {symbol}"
-            )
-
-        return candles
-
-    except urllib.error.HTTPError as error:
-
-        body = error.read().decode(
-            "utf-8",
-            errors="replace"
-        )
-
-        print("")
-        print("ASTER HTTP ERROR")
-        print("Symbol:", symbol)
-        print("HTTP:", error.code)
-        print("Body:", body[:500])
-        print("")
-
-        raise
-
-    except Exception as error:
-
-        print(
-            "ASTER DATA ERROR:",
-            symbol,
-            repr(error)
-        )
-
-        raise
+def public_get(path, params=None):
+    url = ASTER_BASE_URL + path
+    if params:
+        url += "?" + urllib.parse.urlencode(params)
+    return http_json(url, "GET")
 
 
 # ============================================================
-# ATR
+# V3 AUTHENTICATION
 # ============================================================
 
-def atr(candles, period=14):
+def next_nonce():
+    global LAST_NONCE
 
-    if len(candles) < period + 1:
+    with NONCE_LOCK:
+        now = time.time_ns() // 1000
+        if now <= LAST_NONCE:
+            now = LAST_NONCE + 1
+        LAST_NONCE = now
+        return now
+
+
+def validate_credentials():
+    if not ASTER_USER_ADDRESS:
+        raise RuntimeError("ASTER_USER_ADDRESS is missing")
+
+    if not ASTER_API_WALLET:
+        raise RuntimeError("ASTER_API_WALLET is missing")
+
+    if not ASTER_API_PRIVATE_KEY:
+        raise RuntimeError("ASTER_API_PRIVATE_KEY is missing")
+
+    try:
+        derived = Account.from_key(ASTER_API_PRIVATE_KEY).address
+    except Exception as exc:
+        raise RuntimeError("ASTER_API_PRIVATE_KEY is invalid") from exc
+
+    if derived.lower() != ASTER_API_WALLET.lower():
+        raise RuntimeError(
+            "ASTER_API_PRIVATE_KEY does not belong to ASTER_API_WALLET"
+        )
+
+    print(f"Main account: {ASTER_USER_ADDRESS}")
+    print(f"API signer:   {derived}")
+    print("Aster mode:   FUTURES V3 TESTNET")
+
+
+def sign_params(params):
+    encoded = urllib.parse.urlencode(params)
+
+    typed_data = {
+        "types": {
+            "EIP712Domain": [
+                {"name": "name", "type": "string"},
+                {"name": "version", "type": "string"},
+                {"name": "chainId", "type": "uint256"},
+                {"name": "verifyingContract", "type": "address"},
+            ],
+            "Message": [
+                {"name": "msg", "type": "string"},
+            ],
+        },
+        "primaryType": "Message",
+        "domain": {
+            "name": "AsterSignTransaction",
+            "version": "1",
+            "chainId": CHAIN_ID,
+            "verifyingContract": VERIFYING_CONTRACT,
+        },
+        "message": {
+            "msg": encoded,
+        },
+    }
+
+    message = encode_typed_data(full_message=typed_data)
+    signed = Account.sign_message(
+        message,
+        private_key=ASTER_API_PRIVATE_KEY,
+    )
+
+    return signed.signature.hex()
+
+
+def signed_request(path, method="GET", params=None):
+    params = dict(params or {})
+
+    params["signer"] = ASTER_API_WALLET
+    params["nonce"] = str(next_nonce())
+
+    signature = sign_params(params)
+    params["signature"] = signature
+
+    url = ASTER_BASE_URL + path
+
+    if method == "GET":
+        url += "?" + urllib.parse.urlencode(params)
+        return http_json(url, "GET")
+
+    return http_json(url, method, params)
+
+
+# ============================================================
+# MARKET DATA
+# ============================================================
+
+def get_data(symbol, interval="5m", limit=KLINE_LIMIT):
+    data = public_get(
+        "/fapi/v3/klines",
+        {
+            "symbol": symbol,
+            "interval": interval,
+            "limit": limit,
+        },
+    )
+
+    return [
+        {
+            "open": float(row[1]),
+            "high": float(row[2]),
+            "low": float(row[3]),
+            "close": float(row[4]),
+            "volume": float(row[5]),
+        }
+        for row in data
+    ]
+
+
+def exchange_info():
+    return public_get("/fapi/v3/exchangeInfo")
+
+
+EXCHANGE_INFO = None
+SYMBOL_RULES = {}
+
+
+def load_symbol_rules():
+    global EXCHANGE_INFO, SYMBOL_RULES
+
+    EXCHANGE_INFO = exchange_info()
+
+    for item in EXCHANGE_INFO.get("symbols", []):
+        symbol = item.get("symbol")
+        if not symbol:
+            continue
+
+        rules = {}
+
+        for f in item.get("filters", []):
+            ftype = f.get("filterType")
+            rules[ftype] = f
+
+        SYMBOL_RULES[symbol] = rules
+
+
+def floor_step(value, step):
+    value = Decimal(str(value))
+    step = Decimal(str(step))
+
+    if step <= 0:
+        return float(value)
+
+    units = (value / step).to_integral_value(rounding=ROUND_DOWN)
+    result = units * step
+
+    return float(result)
+
+
+def quantity_for(symbol, price, balance):
+    rules = SYMBOL_RULES.get(symbol, {})
+
+    lot = rules.get("MARKET_LOT_SIZE") or rules.get("LOT_SIZE") or {}
+
+    step = float(lot.get("stepSize", "0.001"))
+    minimum = float(lot.get("minQty", "0.001"))
+    maximum = float(lot.get("maxQty", "999999999"))
+
+    # Same risk model as the original bot:
+    # 10% account risk allocation, multiplied by leverage.
+    notional = balance * RISK_PER_TRADE * MAX_LEVERAGE
+
+    quantity = notional / price
+    quantity = floor_step(quantity, step)
+
+    if quantity < minimum:
+        return 0.0
+
+    return min(quantity, maximum)
+
+
+# ============================================================
+# INDICATORS / STRATEGY
+# ============================================================
+
+def sma(values, period):
+    if len(values) < period:
         return None
-
-    values = []
-
-    for i in range(1, len(candles)):
-
-        high = candles[i]["high"]
-        low = candles[i]["low"]
-        previous_close = candles[i - 1]["close"]
-
-        true_range = max(
-            high - low,
-            abs(high - previous_close),
-            abs(low - previous_close),
-        )
-
-        values.append(true_range)
-
     return sum(values[-period:]) / period
 
 
-# ============================================================
-# RSI
-# ============================================================
-
-def rsi(candles, period=14):
-
-    if len(candles) < period + 1:
+def rsi(values, period=14):
+    if len(values) < period + 1:
         return None
 
     gains = []
     losses = []
 
-    for i in range(1, len(candles)):
+    for i in range(1, len(values)):
+        change = values[i] - values[i - 1]
+        gains.append(max(change, 0))
+        losses.append(max(-change, 0))
 
-        change = (
-            candles[i]["close"]
-            - candles[i - 1]["close"]
-        )
+    avg_gain = sum(gains[:period]) / period
+    avg_loss = sum(losses[:period]) / period
 
-        if change >= 0:
-            gains.append(change)
-            losses.append(0)
-        else:
-            gains.append(0)
-            losses.append(abs(change))
-
-    avg_gain = sum(gains[-period:]) / period
-    avg_loss = sum(losses[-period:]) / period
+    for i in range(period, len(gains)):
+        avg_gain = ((avg_gain * (period - 1)) + gains[i]) / period
+        avg_loss = ((avg_loss * (period - 1)) + losses[i]) / period
 
     if avg_loss == 0:
-        return 100
+        return 100.0
 
     rs = avg_gain / avg_loss
+    return 100.0 - (100.0 / (1.0 + rs))
 
-    return 100 - (100 / (1 + rs))
 
+def atr(candles, period=14):
+    if len(candles) < period + 1:
+        return None
 
-# ============================================================
-# MARKET ANALYSIS
-# ============================================================
+    trs = []
+
+    for i in range(1, len(candles)):
+        current = candles[i]
+        previous = candles[i - 1]
+
+        tr = max(
+            current["high"] - current["low"],
+            abs(current["high"] - previous["close"]),
+            abs(current["low"] - previous["close"]),
+        )
+
+        trs.append(tr)
+
+    return sum(trs[-period:]) / period
+
 
 def analyze(symbol):
+    candles = get_data(symbol, "5m", KLINE_LIMIT)
 
-    candles_1m = get_data(
-        symbol,
-        "1m",
-        120
-    )
-
-    candles_5m = get_data(
-        symbol,
-        "5m",
-        120
-    )
-
-    if len(candles_1m) < 100:
+    if len(candles) < 30:
         return None
 
-    if len(candles_5m) < 20:
+    closes = [x["close"] for x in candles]
+    volumes = [x["volume"] for x in candles]
+
+    price = closes[-1]
+    current_rsi = rsi(closes, 14)
+    current_atr = atr(candles, 14)
+
+    fast_ma = sma(closes, 9)
+    slow_ma = sma(closes, 21)
+
+    avg_volume = sma(volumes, 20)
+
+    if (
+        current_rsi is None
+        or current_atr is None
+        or fast_ma is None
+        or slow_ma is None
+        or avg_volume is None
+    ):
         return None
 
-    price = candles_1m[-1]["close"]
+    score_long = 0
+    score_short = 0
 
-    highs = [
-        x["high"]
-        for x in candles_1m[-80:]
-    ]
+    if fast_ma > slow_ma:
+        score_long += 25
+    elif fast_ma < slow_ma:
+        score_short += 25
 
-    lows = [
-        x["low"]
-        for x in candles_1m[-80:]
-    ]
+    if current_rsi < 35:
+        score_long += 25
+    elif current_rsi > 65:
+        score_short += 25
 
-    range_high = max(highs)
-    range_low = min(lows)
+    recent_high = max(x["high"] for x in candles[-20:-1])
+    recent_low = min(x["low"] for x in candles[-20:-1])
 
-    range_width = (
-        range_high - range_low
-    )
+    if price > recent_high:
+        score_long += 25
+    elif price < recent_low:
+        score_short += 25
 
-    current_atr = atr(
-        candles_1m,
-        14
-    )
+    if volumes[-1] > avg_volume * 1.15:
+        if price > closes[-2]:
+            score_long += 20
+        elif price < closes[-2]:
+            score_short += 20
 
-    current_rsi = rsi(
-        candles_1m,
-        14
-    )
+    if current_atr > price * 0.002:
+        if price > fast_ma:
+            score_long += 15
+        elif price < fast_ma:
+            score_short += 15
 
-    if current_atr is None:
-        return None
-
-    if current_rsi is None:
-        return None
-
-    if range_width <= current_atr * 2:
-        return None
-
-    volume_now = (
-        candles_1m[-1]["volume"]
-    )
-
-    average_volume = (
-        sum(
-            x["volume"]
-            for x in candles_1m[-20:]
-        ) / 20
-    )
-
-    slow_price = (
-        candles_5m[-1]["close"]
-    )
-
-    slow_average = (
-        sum(
-            x["close"]
-            for x in candles_5m[-20:]
-        ) / 20
-    )
-
-    score = 0
-    side = None
-
-    near_low = (
-        price
-        <= range_low + range_width * 0.20
-    )
-
-    near_high = (
-        price
-        >= range_high - range_width * 0.20
-    )
-
-    # ========================================================
-    # LONG
-    # ========================================================
-
-    if near_low:
-
-        if current_rsi < 45:
-            score += 30
-
-        if volume_now >= average_volume * 0.8:
-            score += 20
-
-        if slow_price >= slow_average * 0.995:
-            score += 20
-
-        if price > candles_1m[-2]["close"]:
-            score += 20
-
-        if score >= 60:
-            side = "LONG"
-
-    # ========================================================
-    # SHORT
-    # ========================================================
-
-    elif near_high:
-
-        if current_rsi > 55:
-            score += 30
-
-        if volume_now >= average_volume * 0.8:
-            score += 20
-
-        if slow_price <= slow_average * 1.005:
-            score += 20
-
-        if price < candles_1m[-2]["close"]:
-            score += 20
-
-        if score >= 60:
-            side = "SHORT"
-
-    if side is None:
-        return None
+    if score_long >= score_short and score_long >= 60:
+        side = "LONG"
+        score = score_long
+    elif score_short > score_long and score_short >= 60:
+        side = "SHORT"
+        score = score_short
+    else:
+        side = None
+        score = max(score_long, score_short)
 
     return {
         "symbol": symbol,
         "side": side,
-        "price": price,
-        "atr": current_atr,
         "score": score,
-        "range_low": range_low,
-        "range_high": range_high,
+        "price": price,
+        "rsi": current_rsi,
+        "atr": current_atr,
     }
 
 
 # ============================================================
-# OPEN PAPER POSITION
+# ACCOUNT / POSITIONS
 # ============================================================
 
-def open_paper_position(signal):
+def get_balance():
+    data = signed_request("/fapi/v3/balance", "GET", {})
+    for item in data:
+        if item.get("asset") == "USDT":
+            return float(item.get("availableBalance", item.get("balance", 0)))
+    return 0.0
 
-    global balance
 
-    symbol = signal["symbol"]
+def get_positions():
+    data = signed_request("/fapi/v3/positionRisk", "GET", {})
+    result = {}
 
-    if symbol in positions:
-        return
+    for p in data:
+        amount = float(p.get("positionAmt", 0))
 
-    if len(positions) >= MAX_POSITIONS:
-        return
+        if abs(amount) <= 0:
+            continue
 
-    risk_money = (
-        balance * RISK_PER_TRADE
+        result[p["symbol"]] = {
+            "amount": amount,
+            "entry_price": float(p.get("entryPrice", 0)),
+            "position_side": p.get("positionSide", "BOTH"),
+        }
+
+    return result
+
+
+def set_leverage(symbol):
+    return signed_request(
+        "/fapi/v3/leverage",
+        "POST",
+        {
+            "symbol": symbol,
+            "leverage": str(MAX_LEVERAGE),
+        },
     )
 
-    price = signal["price"]
 
-    current_atr = signal["atr"]
+# ============================================================
+# REAL TESTNET ORDERS
+# ============================================================
 
-    stop_distance = max(
-        current_atr * 1.5,
-        price * 0.002,
-    )
-
-    leverage = int(
-        min(
-            MAX_LEVERAGE,
-            max(
-                1,
-                1 / (
-                    stop_distance / price
-                ),
-            ),
-        )
-    )
-
-    quantity = (
-        risk_money / stop_distance
-    )
-
-    if signal["side"] == "LONG":
-
-        stop = (
-            price - stop_distance
-        )
-
-        take_profit = (
-            price
-            + stop_distance * 2
-        )
-
-    else:
-
-        stop = (
-            price + stop_distance
-        )
-
-        take_profit = (
-            price
-            - stop_distance * 2
-        )
-
-    positions[symbol] = {
-
-        "side": signal["side"],
-
-        "entry": price,
-
-        "quantity": quantity,
-
-        "stop": stop,
-
-        "take_profit": take_profit,
-
-        "leverage": leverage,
-
-        "score": signal["score"],
-
-        "opened_at":
-            datetime.now(
-                timezone.utc
-            ).isoformat(),
+def market_order(symbol, side, quantity, reduce_only=False):
+    params = {
+        "symbol": symbol,
+        "type": "MARKET",
+        "side": side,
+        "quantity": format(quantity, ".12f").rstrip("0").rstrip("."),
+        "newOrderRespType": "RESULT",
     }
 
-    print("")
-    print("======================================")
-    print("          PAPER ENTRY")
-    print("======================================")
-    print("Symbol:", symbol)
-    print("Side:", signal["side"])
-    print("Entry:", round(price, 6))
-    print("Stop:", round(stop, 6))
-    print(
-        "Take Profit:",
-        round(take_profit, 6)
+    if reduce_only:
+        params["reduceOnly"] = "true"
+
+    return signed_request(
+        "/fapi/v3/order",
+        "POST",
+        params,
     )
-    print("Leverage:", leverage, "x")
-    print(
-        "Signal Score:",
-        signal["score"]
+
+
+def open_position(symbol, direction, price, balance):
+    quantity = quantity_for(symbol, price, balance)
+
+    if quantity <= 0:
+        print(f"SKIP {symbol}: quantity below exchange minimum")
+        return None
+
+    set_leverage(symbol)
+
+    order_side = "BUY" if direction == "LONG" else "SELL"
+
+    result = market_order(
+        symbol,
+        order_side,
+        quantity,
+        reduce_only=False,
     )
-    print("======================================")
-    print("")
+
+    print(
+        f"TESTNET ENTRY | {symbol} | {direction} | "
+        f"qty={quantity} | response={result}"
+    )
+
+    return result
+
+
+def close_position(symbol, position):
+    amount = abs(float(position["amount"]))
+
+    if amount <= 0:
+        return None
+
+    close_side = "SELL" if position["amount"] > 0 else "BUY"
+
+    result = market_order(
+        symbol,
+        close_side,
+        amount,
+        reduce_only=True,
+    )
+
+    print(
+        f"TESTNET EXIT | {symbol} | "
+        f"side={close_side} | qty={amount} | response={result}"
+    )
+
+    return result
 
 
 # ============================================================
-# MONITOR POSITIONS
+# POSITION MANAGEMENT
 # ============================================================
 
-def monitor_positions():
+def manage_positions(positions):
+    for symbol, position in list(positions.items()):
+        candles = get_data(symbol, "5m", 2)
 
-    global balance
+        if not candles:
+            continue
 
-    for symbol in list(
-        positions.keys()
-    ):
+        price = candles[-1]["close"]
+        entry = position["entry_price"]
 
-        position = positions[symbol]
+        if entry <= 0:
+            continue
 
-        try:
+        amount = position["amount"]
 
-            candles = get_data(
-                symbol,
-                "1m",
-                2
-            )
+        if amount > 0:
+            pnl_pct = (price - entry) / entry
 
-            price = candles[-1]["close"]
+            if pnl_pct >= TAKE_PROFIT_PCT or pnl_pct <= -STOP_LOSS_PCT:
+                close_position(symbol, position)
 
-            side = position["side"]
+        elif amount < 0:
+            pnl_pct = (entry - price) / entry
 
-            entry = position["entry"]
-
-            quantity = position["quantity"]
-
-            exit_price = None
-            reason = None
-
-            # =================================================
-            # LONG
-            # =================================================
-
-            if side == "LONG":
-
-                if price <= position["stop"]:
-
-                    exit_price = (
-                        position["stop"]
-                    )
-
-                    reason = "STOP LOSS"
-
-                elif price >= position["take_profit"]:
-
-                    exit_price = (
-                        position["take_profit"]
-                    )
-
-                    reason = "TAKE PROFIT"
-
-            # =================================================
-            # SHORT
-            # =================================================
-
-            else:
-
-                if price >= position["stop"]:
-
-                    exit_price = (
-                        position["stop"]
-                    )
-
-                    reason = "STOP LOSS"
-
-                elif price <= position["take_profit"]:
-
-                    exit_price = (
-                        position["take_profit"]
-                    )
-
-                    reason = "TAKE PROFIT"
-
-            # =================================================
-            # CLOSE POSITION
-            # =================================================
-
-            if exit_price is not None:
-
-                if side == "LONG":
-
-                    pnl = (
-                        exit_price - entry
-                    ) * quantity
-
-                else:
-
-                    pnl = (
-                        entry - exit_price
-                    ) * quantity
-
-                balance += pnl
-
-                print("")
-                print("======================================")
-                print("          PAPER EXIT")
-                print("======================================")
-                print("Symbol:", symbol)
-                print("Reason:", reason)
-                print(
-                    "Exit:",
-                    round(exit_price, 6)
-                )
-                print(
-                    "PnL:",
-                    round(pnl, 4),
-                    "USDT"
-                )
-                print(
-                    "Balance:",
-                    round(balance, 4),
-                    "USDT"
-                )
-                print("======================================")
-                print("")
-
-                del positions[symbol]
-
-        except Exception as error:
-
-            print(
-                "Position monitor error:",
-                symbol,
-                repr(error)
-            )
+            if pnl_pct >= TAKE_PROFIT_PCT or pnl_pct <= -STOP_LOSS_PCT:
+                close_position(symbol, position)
 
 
 # ============================================================
@@ -583,117 +565,77 @@ def monitor_positions():
 # ============================================================
 
 def main():
+    print("==============================================")
+    print("ASTER FUTURES V3 TESTNET TRADING BOT")
+    print("==============================================")
 
-    print("")
-    print("======================================")
-    print("     ASTER FUTURES PAPER BOT")
-    print("======================================")
-    print(
-        "Starting balance:",
-        STARTING_BALANCE,
-        "USDT"
-    )
-    print(
-        "Risk per trade:",
-        RISK_PER_TRADE * 100,
-        "%"
-    )
-    print(
-        "Maximum leverage:",
-        MAX_LEVERAGE,
-        "x"
-    )
-    print(
-        "Maximum positions:",
-        MAX_POSITIONS
-    )
-    print("Exchange: ASTER")
-    print("Mode: PAPER TRADING")
-    print("======================================")
-    print("")
+    validate_credentials()
+
+    print("Loading exchange information...")
+    load_symbol_rules()
+
+    print("Checking testnet account...")
+    balance = get_balance()
+    print(f"Testnet USDT balance: {balance}")
 
     while True:
-
         try:
+            positions = get_positions()
 
-            # -----------------------------------------------
-            # Monitor existing positions
-            # -----------------------------------------------
+            manage_positions(positions)
 
-            monitor_positions()
-
-            # -----------------------------------------------
-            # Scan markets
-            # -----------------------------------------------
-
-            for symbol in SYMBOLS:
-
-                if len(positions) >= MAX_POSITIONS:
-                    break
-
-                try:
-
-                    signal = analyze(symbol)
-
-                    if signal:
-
-                        print(
-                            datetime.now().strftime(
-                                "%Y-%m-%d %H:%M:%S"
-                            ),
-                            "| SIGNAL",
-                            signal["symbol"],
-                            signal["side"],
-                            "| score:",
-                            signal["score"],
-                        )
-
-                        open_paper_position(
-                            signal
-                        )
-
-                except Exception as error:
-
-                    print(
-                        "Analysis error:",
-                        symbol,
-                        repr(error)
-                    )
-
-            # -----------------------------------------------
-            # Status
-            # -----------------------------------------------
+            positions = get_positions()
+            balance = get_balance()
 
             print(
-                datetime.now().strftime(
-                    "%Y-%m-%d %H:%M:%S"
-                ),
-                "| Exchange: ASTER",
-                "| Balance:",
-                round(balance, 4),
-                "| Open positions:",
-                len(positions),
+                f"{time.strftime('%Y-%m-%d %H:%M:%S')} | "
+                f"ASTER TESTNET | Balance: {balance:.4f} | "
+                f"Open positions: {len(positions)}"
             )
 
-            # -----------------------------------------------
-            # Wait one minute
-            # -----------------------------------------------
+            if len(positions) < MAX_POSITIONS:
+                for symbol in SYMBOLS:
+                    if symbol in positions:
+                        continue
 
-            time.sleep(60)
+                    try:
+                        signal = analyze(symbol)
 
-        except Exception as error:
+                        if not signal:
+                            continue
 
-            print(
-                "Main loop error:",
-                repr(error)
-            )
+                        if signal["side"]:
+                            print(
+                                f"SIGNAL {symbol} {signal['side']} | "
+                                f"score: {signal['score']} | "
+                                f"price: {signal['price']}"
+                            )
 
-            time.sleep(30)
+                            open_position(
+                                symbol,
+                                signal["side"],
+                                signal["price"],
+                                balance,
+                            )
 
+                            positions = get_positions()
 
-# ============================================================
-# START
-# ============================================================
+                            if len(positions) >= MAX_POSITIONS:
+                                break
+
+                    except Exception as exc:
+                        print(f"ERROR {symbol}: {exc}")
+
+            time.sleep(SCAN_INTERVAL_SECONDS)
+
+        except KeyboardInterrupt:
+            print("Bot stopped.")
+            break
+
+        except Exception as exc:
+            print(f"MAIN ERROR: {exc}")
+            time.sleep(15)
+
 
 if __name__ == "__main__":
     main()
