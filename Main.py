@@ -66,6 +66,7 @@ def get_data(symbol, interval="1m", limit=100):
 
 
     return candles
+    def atr(candles, period=14):
     if len(candles) < period + 1:
         return None
 
@@ -85,9 +86,7 @@ def get_data(symbol, interval="1m", limit=100):
         values.append(true_range)
 
     return sum(values[-period:]) / period
-
-
-def rsi(candles, period=14):
+    def rsi(candles, period=14):
     if len(candles) < period + 1:
         return None
 
