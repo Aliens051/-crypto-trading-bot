@@ -151,13 +151,7 @@ def sign_params(params):
         private_key=PRIVATE_KEY
     )
 
-    signature = bytearray(signed.signature)
-
-    # Aster V3 expects EIP-712 v = 27/28
-    if signature[64] in (0, 1):
-        signature[64] += 27
-
-    return encoded, "0x" + bytes(signature).hex()
+    return encoded, signed.signature.hex()
 
 
 # ============================================================
@@ -193,13 +187,7 @@ def signed_get(path, params=None):
 
     params = dict(params)
 
-    # --------------------------------------------------------
-    # Aster V3 authentication payload
-    # nonce + user + signer
-    # --------------------------------------------------------
-
     params["nonce"] = str(get_nonce())
-    params["user"] = USER
     params["signer"] = API_WALLET
 
     encoded, signature = sign_params(params)
@@ -356,15 +344,7 @@ def main():
     print("ASTER FUTURES V3 TESTNET BOT")
     print("=" * 60)
 
-    # --------------------------------------------------------
-    # 1. Credentials
-    # --------------------------------------------------------
-
     validate_credentials()
-
-    # --------------------------------------------------------
-    # 2. Connectivity
-    # --------------------------------------------------------
 
     print("\nTesting connection...")
 
@@ -379,10 +359,6 @@ def main():
         "SERVER TIME:",
         server
     )
-
-    # --------------------------------------------------------
-    # 3. Exchange info
-    # --------------------------------------------------------
 
     print(
         "\nLoading exchange info..."
@@ -407,10 +383,6 @@ def main():
 
     print("BTCUSDT: OK")
 
-    # --------------------------------------------------------
-    # 4. Account balance
-    # --------------------------------------------------------
-
     print(
         "\nLoading balance..."
     )
@@ -420,10 +392,6 @@ def main():
     print("BALANCE:")
     print(balance)
 
-    # --------------------------------------------------------
-    # 5. Positions
-    # --------------------------------------------------------
-
     print(
         "\nLoading positions..."
     )
@@ -432,10 +400,6 @@ def main():
 
     print("POSITIONS:")
     print(positions)
-
-    # --------------------------------------------------------
-    # 6. Trading loop
-    # --------------------------------------------------------
 
     print(
         "\nBOT IS RUNNING"
