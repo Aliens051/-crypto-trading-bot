@@ -4,7 +4,7 @@ import urllib.parse
 import requests
 
 from eth_account import Account
-from eth_account.messages import encode_structured_data
+from eth_account.messages import encode_typed_data
 
 
 BASE_URL = "https://fapi.asterdex-testnet.com"
@@ -52,7 +52,7 @@ TYPED_DATA = {
     "domain": {
         "name": "AsterSignTransaction",
         "version": "1",
-        "chainId": 714,
+        "chainId": 1666,
         "verifyingContract": "0x0000000000000000000000000000000000000000",
     },
     "message": {
@@ -61,23 +61,8 @@ TYPED_DATA = {
 }
 
 
-_last_second = 0
-_nonce_counter = 0
-
-
 def get_nonce():
-    global _last_second
-    global _nonce_counter
-
-    now = int(time.time())
-
-    if now == _last_second:
-        _nonce_counter += 1
-    else:
-        _last_second = now
-        _nonce_counter = 0
-
-    return now * 1_000_000 + _nonce_counter
+    return int(time.time() * 1_000_000)
 
 
 def sign_params(params):
@@ -88,9 +73,10 @@ def sign_params(params):
 
     encoded = urllib.parse.urlencode(params)
 
-    TYPED_DATA["message"]["msg"] = encoded
+    typed_data = dict(TYPED_DATA)
+    typed_data["message"] = {"msg": encoded}
 
-    message = encode_structured_data(TYPED_DATA)
+    message = encode_typed_data(full_message=typed_data)
 
     signed = Account.sign_message(
         message,
@@ -185,7 +171,7 @@ def main():
     get_klines()
 
     print("==============================================")
-    print("ASTER FUTURES V3 TESTNET AUTH OK")
+    print("ASTER FUTURES V3 TESTNET AUTH CHECK")
     print("==============================================")
 
     while True:
@@ -194,4 +180,3 @@ def main():
 
 if __name__ == "__main__":
     main()
- 
