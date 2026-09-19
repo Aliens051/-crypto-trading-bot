@@ -8,12 +8,11 @@ from eth_account.messages import encode_typed_data
 
 
 # ============================================================
-# CONFIG
+# ASTER FUTURES TESTNET V3
 # ============================================================
 
 BASE_URL = "https://fapi.asterdex-testnet.com"
 
-USER = os.getenv("ASTER_USER_ADDRESS", "").strip()
 API_WALLET = os.getenv("ASTER_API_WALLET", "").strip()
 PRIVATE_KEY = os.getenv("ASTER_API_PRIVATE_KEY", "").strip()
 
@@ -43,25 +42,22 @@ TYPES = {
 
 
 # ============================================================
-# SESSION
+# HTTP
 # ============================================================
 
 session = requests.Session()
 
 session.headers.update({
     "Content-Type": "application/x-www-form-urlencoded",
-    "User-Agent": "AsterFuturesTestnetBot/1.0",
+    "User-Agent": "PythonApp/1.0",
 })
 
 
 # ============================================================
-# CHECK VARIABLES
+# CREDENTIALS
 # ============================================================
 
 def validate_credentials():
-    if not USER:
-        raise RuntimeError("ASTER_USER_ADDRESS is missing")
-
     if not API_WALLET:
         raise RuntimeError("ASTER_API_WALLET is missing")
 
@@ -84,8 +80,7 @@ def validate_credentials():
         )
 
     print("Credential check: OK")
-    print("API Wallet:", API_WALLET)
-    print("Main User:", USER)
+    print("Signer:", API_WALLET)
 
 
 # ============================================================
@@ -100,19 +95,22 @@ def get_nonce():
     global _last_second
     global _nonce_counter
 
-    current_second = int(time.time())
+    now_second = int(time.time())
 
-    if current_second == _last_second:
+    if now_second == _last_second:
         _nonce_counter += 1
     else:
-        _last_second = current_second
+        _last_second = now_second
         _nonce_counter = 0
 
-    return current_second * 1_000_000 + _nonce_counter
+    return (
+        now_second * 1_000_000
+        + _nonce_counter
+    )
 
 
 # ============================================================
-# SIGN
+# SIGNATURE
 # ============================================================
 
 def sign_params(params):
@@ -127,7 +125,9 @@ def sign_params(params):
         },
     }
 
-    message = encode_typed_data(full_message=typed_data)
+    message = encode_typed_data(
+        full_message=typed_data
+    )
 
     signed = Account.sign_message(
         message,
@@ -138,20 +138,18 @@ def sign_params(params):
 
 
 # ============================================================
-# PUBLIC REQUEST
+# PUBLIC GET
 # ============================================================
 
 def public_get(path, params=None):
-    url = BASE_URL + path
-
     response = session.get(
-        url,
+        BASE_URL + path,
         params=params,
         timeout=20
     )
 
     if not response.ok:
-        print("PUBLIC ERROR:")
+        print("ASTER PUBLIC ERROR:")
         print(response.text)
 
     response.raise_for_status()
@@ -163,17 +161,14 @@ def public_get(path, params=None):
 # SIGNED GET
 # ============================================================
 
-def signed_get(path, params=None, use_timestamp=False):
+def signed_get(path, params=None):
     if params is None:
         params = {}
 
     params = dict(params)
 
-    if use_timestamp:
-        params["timestamp"] = int(time.time() * 1000)
-    else:
-        params["nonce"] = get_nonce()
-
+    # Required V3 authentication parameters
+    params["nonce"] = get_nonce()
     params["signer"] = API_WALLET
 
     encoded, signature = sign_params(params)
@@ -215,7 +210,7 @@ def ping():
 # SERVER TIME
 # ============================================================
 
-def server_time():
+def get_server_time():
     return public_get("/fapi/v3/time")
 
 
@@ -223,7 +218,7 @@ def server_time():
 # EXCHANGE INFO
 # ============================================================
 
-def exchange_info():
+def get_exchange_info():
     return public_get("/fapi/v3/exchangeInfo")
 
 
@@ -232,34 +227,24 @@ def exchange_info():
 # ============================================================
 
 def get_balance():
-    # IMPORTANT:
-    # /fapi/v3/balance requires timestamp according
-    # to Aster Futures Testnet documentation.
     return signed_get(
         "/fapi/v3/balance",
-        use_timestamp=True
+        {
+            "timestamp": int(time.time() * 1000)
+        }
     )
 
 
 # ============================================================
-# ACCOUNT
-# ============================================================
-
-def get_account():
-    return signed_get(
-        "/fapi/v3/account",
-        use_timestamp=True
-    )
-
-
-# ============================================================
-# POSITIONS
+# POSITION
 # ============================================================
 
 def get_positions():
     return signed_get(
         "/fapi/v3/positionRisk",
-        use_timestamp=True
+        {
+            "timestamp": int(time.time() * 1000)
+        }
     )
 
 
@@ -277,16 +262,17 @@ def get_klines(
         {
             "symbol": symbol,
             "interval": interval,
-            "limit": limit,
+            "limit": limit
         }
     )
 
 
 # ============================================================
-# SIMPLE SIGNAL
+# SIGNAL
 # ============================================================
 
 def calculate_signal(klines):
+
     if len(klines) < 20:
         return "WAIT"
 
@@ -295,13 +281,13 @@ def calculate_signal(klines):
         for candle in klines
     ]
 
-    fast = sum(closes[-5:]) / 5
-    slow = sum(closes[-20:]) / 20
+    fast_ma = sum(closes[-5:]) / 5
+    slow_ma = sum(closes[-20:]) / 20
 
-    if fast > slow:
+    if fast_ma > slow_ma:
         return "BUY"
 
-    if fast < slow:
+    if fast_ma < slow_ma:
         return "SELL"
 
     return "WAIT"
@@ -313,46 +299,57 @@ def calculate_signal(klines):
 
 def main():
 
-    print("=" * 50)
+    print("=" * 60)
     print("ASTER FUTURES V3 TESTNET BOT")
-    print("=" * 50)
+    print("=" * 60)
 
+    # 1. Credentials
     validate_credentials()
 
+    # 2. Connectivity
     print("\nTesting connection...")
 
-    ping_result = ping()
-    print("PING:", ping_result)
+    print("PING:", ping())
 
-    time_result = server_time()
-    print("SERVER TIME:", time_result)
+    server = get_server_time()
+    print("SERVER TIME:", server)
 
-    print("\nGetting exchange info...")
-    info = exchange_info()
+    # 3. Exchange info
+    print("\nLoading exchange info...")
+
+    exchange = get_exchange_info()
 
     symbols = {
         item["symbol"]
-        for item in info.get("symbols", [])
+        for item in exchange.get("symbols", [])
     }
 
-    print("BTCUSDT available:", "BTCUSDT" in symbols)
+    if "BTCUSDT" not in symbols:
+        raise RuntimeError(
+            "BTCUSDT is not available on Futures Testnet"
+        )
 
-    print("\nGetting balance...")
+    print("BTCUSDT: OK")
+
+    # 4. Account balance
+    print("\nLoading balance...")
+
     balance = get_balance()
+
     print("BALANCE:")
     print(balance)
 
-    print("\nGetting account...")
-    account = get_account()
-    print("ACCOUNT:")
-    print(account)
+    # 5. Positions
+    print("\nLoading positions...")
 
-    print("\nGetting positions...")
     positions = get_positions()
+
     print("POSITIONS:")
     print(positions)
 
-    print("\nStarting market loop...")
+    # 6. Trading loop
+    print("\nBOT IS RUNNING")
+    print("-" * 60)
 
     while True:
 
@@ -364,14 +361,18 @@ def main():
                 limit=100
             )
 
-            signal = calculate_signal(klines)
+            last_price = float(
+                klines[-1][4]
+            )
 
-            last_price = float(klines[-1][4])
+            signal = calculate_signal(
+                klines
+            )
 
             print(
                 f"BTCUSDT | "
-                f"Price={last_price} | "
-                f"Signal={signal}"
+                f"Price: {last_price} | "
+                f"Signal: {signal}"
             )
 
             time.sleep(30)
