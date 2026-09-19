@@ -2,30 +2,25 @@ import os
 import time
 import urllib.parse
 import requests
+
 from eth_account import Account
 from eth_account.messages import encode_typed_data
 
+
+# ============================================================
+# CONFIG
+# ============================================================
+
 BASE_URL = "https://fapi.asterdex-testnet.com"
 
-USER = os.environ["ASTER_USER_ADDRESS"].strip()
-API_WALLET = os.environ["ASTER_API_WALLET"].strip()
-PRIVATE_KEY = os.environ["ASTER_API_PRIVATE_KEY"].strip()
+USER = os.getenv("ASTER_USER_ADDRESS", "").strip()
+API_WALLET = os.getenv("ASTER_API_WALLET", "").strip()
+PRIVATE_KEY = os.getenv("ASTER_API_PRIVATE_KEY", "").strip()
 
-signer = Account.from_key(PRIVATE_KEY).address
 
-print("==============================================")
-print("ASTER FUTURES V3 TESTNET")
-print("==============================================")
-print("USER:", USER)
-print("API WALLET:", API_WALLET)
-print("DERIVED SIGNER:", signer)
-
-if signer.lower() != API_WALLET.lower():
-    raise RuntimeError(
-        f"API private key mismatch: derived={signer}, wallet={API_WALLET}"
-    )
-
-session = requests.Session()
+# ============================================================
+# EIP-712
+# ============================================================
 
 DOMAIN = {
     "name": "AsterSignTransaction",
@@ -47,130 +42,350 @@ TYPES = {
 }
 
 
-def nonce():
-    return int(time.time() * 1_000_000)
+# ============================================================
+# SESSION
+# ============================================================
 
+session = requests.Session()
+
+session.headers.update({
+    "Content-Type": "application/x-www-form-urlencoded",
+    "User-Agent": "AsterFuturesTestnetBot/1.0",
+})
+
+
+# ============================================================
+# CHECK VARIABLES
+# ============================================================
+
+def validate_credentials():
+    if not USER:
+        raise RuntimeError("ASTER_USER_ADDRESS is missing")
+
+    if not API_WALLET:
+        raise RuntimeError("ASTER_API_WALLET is missing")
+
+    if not PRIVATE_KEY:
+        raise RuntimeError("ASTER_API_PRIVATE_KEY is missing")
+
+    try:
+        account = Account.from_key(PRIVATE_KEY)
+    except Exception as e:
+        raise RuntimeError(
+            f"Invalid ASTER_API_PRIVATE_KEY: {e}"
+        )
+
+    derived = account.address
+
+    if derived.lower() != API_WALLET.lower():
+        raise RuntimeError(
+            f"API private key mismatch: "
+            f"derived={derived}, wallet={API_WALLET}"
+        )
+
+    print("Credential check: OK")
+    print("API Wallet:", API_WALLET)
+    print("Main User:", USER)
+
+
+# ============================================================
+# NONCE
+# ============================================================
+
+_last_second = 0
+_nonce_counter = 0
+
+
+def get_nonce():
+    global _last_second
+    global _nonce_counter
+
+    current_second = int(time.time())
+
+    if current_second == _last_second:
+        _nonce_counter += 1
+    else:
+        _last_second = current_second
+        _nonce_counter = 0
+
+    return current_second * 1_000_000 + _nonce_counter
+
+
+# ============================================================
+# SIGN
+# ============================================================
 
 def sign_params(params):
-    params = dict(params)
-
-    params["nonce"] = str(nonce())
-    params["signer"] = API_WALLET
-
-    query = urllib.parse.urlencode(params)
+    encoded = urllib.parse.urlencode(params)
 
     typed_data = {
         "types": TYPES,
         "primaryType": "Message",
         "domain": DOMAIN,
         "message": {
-            "msg": query,
+            "msg": encoded
         },
     }
 
-    encoded = encode_typed_data(full_message=typed_data)
+    message = encode_typed_data(full_message=typed_data)
 
     signed = Account.sign_message(
-        encoded,
-        private_key=PRIVATE_KEY,
+        message,
+        private_key=PRIVATE_KEY
     )
 
-    params["signature"] = signed.signature.hex()
+    return encoded, signed.signature.hex()
 
-    return params
 
+# ============================================================
+# PUBLIC REQUEST
+# ============================================================
 
 def public_get(path, params=None):
-    r = session.get(
-        BASE_URL + path,
-        params=params or {},
-        timeout=20,
+    url = BASE_URL + path
+
+    response = session.get(
+        url,
+        params=params,
+        timeout=20
     )
 
-    print("PUBLIC", path, r.status_code, r.text)
+    if not response.ok:
+        print("PUBLIC ERROR:")
+        print(response.text)
 
-    r.raise_for_status()
-    return r.json()
+    response.raise_for_status()
+
+    return response.json()
 
 
-def signed_get(path, params=None):
-    signed = sign_params(params or {})
+# ============================================================
+# SIGNED GET
+# ============================================================
 
-    r = session.get(
-        BASE_URL + path,
-        params=signed,
-        timeout=20,
+def signed_get(path, params=None, use_timestamp=False):
+    if params is None:
+        params = {}
+
+    params = dict(params)
+
+    if use_timestamp:
+        params["timestamp"] = int(time.time() * 1000)
+    else:
+        params["nonce"] = get_nonce()
+
+    params["signer"] = API_WALLET
+
+    encoded, signature = sign_params(params)
+
+    url = (
+        BASE_URL
+        + path
+        + "?"
+        + encoded
+        + "&signature="
+        + signature
     )
 
-    print("SIGNED", path, r.status_code, r.text)
+    print("SIGNED:", path)
 
-    r.raise_for_status()
-    return r.json()
+    response = session.get(
+        url,
+        timeout=20
+    )
+
+    if not response.ok:
+        print("ASTER ERROR:")
+        print(response.text)
+
+    response.raise_for_status()
+
+    return response.json()
 
 
-def test_connection():
-    public_get("/fapi/v3/ping")
+# ============================================================
+# PING
+# ============================================================
+
+def ping():
+    return public_get("/fapi/v3/ping")
 
 
-def get_server_time():
+# ============================================================
+# SERVER TIME
+# ============================================================
+
+def server_time():
     return public_get("/fapi/v3/time")
 
 
-def get_exchange_info():
+# ============================================================
+# EXCHANGE INFO
+# ============================================================
+
+def exchange_info():
     return public_get("/fapi/v3/exchangeInfo")
 
 
+# ============================================================
+# BALANCE
+# ============================================================
+
 def get_balance():
+    # IMPORTANT:
+    # /fapi/v3/balance requires timestamp according
+    # to Aster Futures Testnet documentation.
     return signed_get(
         "/fapi/v3/balance",
-        {}
+        use_timestamp=True
     )
 
+
+# ============================================================
+# ACCOUNT
+# ============================================================
+
+def get_account():
+    return signed_get(
+        "/fapi/v3/account",
+        use_timestamp=True
+    )
+
+
+# ============================================================
+# POSITIONS
+# ============================================================
 
 def get_positions():
     return signed_get(
         "/fapi/v3/positionRisk",
-        {}
+        use_timestamp=True
     )
 
 
-def get_klines():
+# ============================================================
+# KLINES
+# ============================================================
+
+def get_klines(
+    symbol="BTCUSDT",
+    interval="1m",
+    limit=100
+):
     return public_get(
         "/fapi/v3/klines",
         {
-            "symbol": "BTCUSDT",
-            "interval": "5m",
-            "limit": 100,
-        },
+            "symbol": symbol,
+            "interval": interval,
+            "limit": limit,
+        }
     )
 
 
+# ============================================================
+# SIMPLE SIGNAL
+# ============================================================
+
+def calculate_signal(klines):
+    if len(klines) < 20:
+        return "WAIT"
+
+    closes = [
+        float(candle[4])
+        for candle in klines
+    ]
+
+    fast = sum(closes[-5:]) / 5
+    slow = sum(closes[-20:]) / 20
+
+    if fast > slow:
+        return "BUY"
+
+    if fast < slow:
+        return "SELL"
+
+    return "WAIT"
+
+
+# ============================================================
+# MAIN
+# ============================================================
+
 def main():
-    print("TEST CONNECTION")
-    test_connection()
 
-    print("SERVER TIME")
-    get_server_time()
+    print("=" * 50)
+    print("ASTER FUTURES V3 TESTNET BOT")
+    print("=" * 50)
 
-    print("EXCHANGE INFO")
-    get_exchange_info()
+    validate_credentials()
 
-    print("BALANCE")
-    get_balance()
+    print("\nTesting connection...")
 
-    print("POSITIONS")
-    get_positions()
+    ping_result = ping()
+    print("PING:", ping_result)
 
-    print("KLINES")
-    get_klines()
+    time_result = server_time()
+    print("SERVER TIME:", time_result)
 
-    print("==============================================")
-    print("ASTER V3 TESTNET AUTH CHECK PASSED")
-    print("==============================================")
+    print("\nGetting exchange info...")
+    info = exchange_info()
+
+    symbols = {
+        item["symbol"]
+        for item in info.get("symbols", [])
+    }
+
+    print("BTCUSDT available:", "BTCUSDT" in symbols)
+
+    print("\nGetting balance...")
+    balance = get_balance()
+    print("BALANCE:")
+    print(balance)
+
+    print("\nGetting account...")
+    account = get_account()
+    print("ACCOUNT:")
+    print(account)
+
+    print("\nGetting positions...")
+    positions = get_positions()
+    print("POSITIONS:")
+    print(positions)
+
+    print("\nStarting market loop...")
 
     while True:
-        time.sleep(60)
 
+        try:
+
+            klines = get_klines(
+                symbol="BTCUSDT",
+                interval="1m",
+                limit=100
+            )
+
+            signal = calculate_signal(klines)
+
+            last_price = float(klines[-1][4])
+
+            print(
+                f"BTCUSDT | "
+                f"Price={last_price} | "
+                f"Signal={signal}"
+            )
+
+            time.sleep(30)
+
+        except Exception as e:
+
+            print("LOOP ERROR:", e)
+
+            time.sleep(30)
+
+
+# ============================================================
+# START
+# ============================================================
 
 if __name__ == "__main__":
     main()
