@@ -8,7 +8,8 @@ from eth_account.messages import encode_typed_data
 
 
 # ============================================================
-# ASTER FUTURES TESTNET V3
+# Aster Futures V3 TESTNET - AGENT DIAGNOSTIC ONLY
+# This file does NOT place orders.
 # ============================================================
 
 BASE_URL = "https://fapi.asterdex-testnet.com"
@@ -17,480 +18,292 @@ API_WALLET = os.getenv("ASTER_API_WALLET", "").strip()
 PRIVATE_KEY = os.getenv("ASTER_API_PRIVATE_KEY", "").strip()
 USER_ADDRESS = os.getenv("ASTER_USER_ADDRESS", "").strip()
 
+# Official Aster Futures Testnet EIP-712 chain ID
+CHAIN_ID = 714
 
-# ============================================================
-# EIP-712
-# ============================================================
-
-DOMAIN = {
-    "name": "AsterSignTransaction",
-    "version": "1",
-    "chainId": 1666,
-    "verifyingContract": "0x0000000000000000000000000000000000000000",
-}
-
-TYPES = {
-    "EIP712Domain": [
-        {"name": "name", "type": "string"},
-        {"name": "version", "type": "string"},
-        {"name": "chainId", "type": "uint256"},
-        {"name": "verifyingContract", "type": "address"},
-    ],
-    "Message": [
-        {"name": "msg", "type": "string"},
-    ],
-}
+NONCE_COUNTER = 0
 
 
-# ============================================================
-# HTTP
-# ============================================================
+# ------------------------------------------------------------
+# Helpers
+# ------------------------------------------------------------
 
-session = requests.Session()
-
-session.headers.update({
-    "Content-Type": "application/x-www-form-urlencoded",
-    "User-Agent": "PythonApp/1.0",
-})
+def fail(message):
+    print("\nERROR:")
+    print(message)
+    raise SystemExit(1)
 
 
-# ============================================================
-# CREDENTIALS
-# ============================================================
+def normalize_address(address):
+    return address.lower()
 
-def validate_credentials():
 
-    if not API_WALLET:
-        raise RuntimeError(
-            "ASTER_API_WALLET is missing"
+def validate_address(name, address):
+    if not address:
+        fail(f"{name} is missing.")
+
+    if not address.startswith("0x") or len(address) != 42:
+        fail(
+            f"{name} is not a valid EVM address.\n"
+            f"Length received: {len(address)}"
         )
 
-    if not PRIVATE_KEY:
-        raise RuntimeError(
-            "ASTER_API_PRIVATE_KEY is missing"
-        )
 
-    if not USER_ADDRESS:
-        raise RuntimeError(
-            "ASTER_USER_ADDRESS is missing"
-        )
+def get_server_time_ms():
+    url = f"{BASE_URL}/fapi/v3/time"
 
-    # Validate user address format
-    if (
-        not USER_ADDRESS.startswith("0x")
-        or len(USER_ADDRESS) != 42
-    ):
-        raise RuntimeError(
-            "ASTER_USER_ADDRESS must be a valid "
-            "20-byte EVM address"
-        )
+    response = requests.get(url, timeout=15)
 
-    try:
-        int(USER_ADDRESS[2:], 16)
-    except ValueError:
-        raise RuntimeError(
-            "ASTER_USER_ADDRESS contains invalid hex characters"
-        )
+    print("\nSERVER TIME HTTP:", response.status_code)
 
-    try:
-        account = Account.from_key(PRIVATE_KEY)
+    response.raise_for_status()
 
-    except Exception as e:
-        raise RuntimeError(
-            f"Invalid ASTER_API_PRIVATE_KEY: {e}"
-        )
+    data = response.json()
 
-    derived = account.address
+    if "serverTime" not in data:
+        fail(f"Unexpected server time response:\n{data}")
 
-    if derived.lower() != API_WALLET.lower():
-        raise RuntimeError(
-            "API private key mismatch: "
-            f"derived={derived}, "
-            f"wallet={API_WALLET}"
-        )
-
-    print("Credential check: OK")
-    print("User:", USER_ADDRESS)
-    print("Signer:", API_WALLET)
+    return int(data["serverTime"])
 
 
-# ============================================================
-# NONCE
-# ============================================================
+def get_nonce(server_time_ms):
+    global NONCE_COUNTER
 
-_last_second = 0
-_nonce_counter = 0
+    NONCE_COUNTER += 1
 
-
-def get_nonce():
-
-    global _last_second
-    global _nonce_counter
-
-    now_second = int(time.time())
-
-    if now_second == _last_second:
-        _nonce_counter += 1
-    else:
-        _last_second = now_second
-        _nonce_counter = 0
-
-    return (
-        now_second * 1_000_000
-        + _nonce_counter
-    )
+    # Server time is milliseconds.
+    # Aster expects a microseconds-style nonce.
+    return (int(server_time_ms) * 1000) + NONCE_COUNTER
 
 
-# ============================================================
-# PARAMETER STRING
-# ============================================================
-
-def build_param_string(params):
-
-    # Aster V3:
-    # - all values as strings
-    # - ASCII-sort parameter names
-    # - exact resulting string is signed
-
-    normalized = {}
-
-    for key, value in params.items():
-        normalized[str(key)] = str(value)
-
-    sorted_items = sorted(
-        normalized.items(),
-        key=lambda item: item[0]
+def canonical_query(params):
+    """
+    Create the exact query string that will also be signed.
+    """
+    items = sorted(
+        [(str(k), str(v)) for k, v in params.items()],
+        key=lambda x: x[0]
     )
 
     return urllib.parse.urlencode(
-        sorted_items
+        items,
+        doseq=False,
+        safe=""
     )
 
 
-# ============================================================
-# EIP-712 SIGNATURE
-# ============================================================
-
-def sign_params(params):
-
-    param_string = build_param_string(
-        params
-    )
+def sign_message(query_string):
+    """
+    Official trading/authentication mode:
+    EIP-712 fixed Message type, signing only msg.
+    """
 
     typed_data = {
-        "types": TYPES,
+        "types": {
+            "EIP712Domain": [
+                {"name": "name", "type": "string"},
+                {"name": "version", "type": "string"},
+                {"name": "chainId", "type": "uint256"},
+                {"name": "verifyingContract", "type": "address"},
+            ],
+            "Message": [
+                {"name": "msg", "type": "string"},
+            ],
+        },
         "primaryType": "Message",
-        "domain": DOMAIN,
+        "domain": {
+            "name": "AsterSignTransaction",
+            "version": "1",
+            "chainId": CHAIN_ID,
+            "verifyingContract": "0x0000000000000000000000000000000000000000",
+        },
         "message": {
-            "msg": param_string
+            "msg": query_string,
         },
     }
 
-    message = encode_typed_data(
-        full_message=typed_data
-    )
+    signable = encode_typed_data(full_message=typed_data)
 
     signed = Account.sign_message(
-        message,
+        signable,
         private_key=PRIVATE_KEY
     )
 
-    # Official Aster format:
-    # signed.signature.hex()
-    signature = signed.signature.hex()
+    return signed.signature.hex()
 
-    return param_string, signature
 
+def get_agents():
+    print("\n========================================")
+    print("ASTER TESTNET - AGENT CHECK")
+    print("========================================")
 
-# ============================================================
-# PUBLIC GET
-# ============================================================
+    server_time_ms = get_server_time_ms()
 
-def public_get(path, params=None):
+    nonce = get_nonce(server_time_ms)
 
-    response = session.get(
-        BASE_URL + path,
-        params=params,
-        timeout=20
-    )
-
-    if not response.ok:
-        print("ASTER PUBLIC ERROR:")
-        print(response.text)
-
-    response.raise_for_status()
-
-    return response.json()
-
-
-# ============================================================
-# SIGNED GET
-# ============================================================
-
-def signed_get(path, params=None):
-
-    if params is None:
-        params = {}
-
-    request_params = dict(params)
-
-    # Official V3 authentication fields
-    request_params["user"] = USER_ADDRESS
-    request_params["signer"] = API_WALLET
-    request_params["nonce"] = str(
-        get_nonce()
-    )
-
-    # IMPORTANT:
-    # The exact same sorted/encoded string
-    # must be signed and sent before signature.
-    param_string, signature = sign_params(
-        request_params
-    )
-
-    url = (
-        BASE_URL
-        + path
-        + "?"
-        + param_string
-        + "&signature="
-        + signature
-    )
-
-    print("SIGNED:", path)
-    print("MSG:", param_string)
-
-    response = session.get(
-        url,
-        timeout=20
-    )
-
-    if not response.ok:
-
-        print("ASTER ERROR:")
-        print(response.text)
-
-        print("URL:")
-        print(url)
-
-    response.raise_for_status()
-
-    return response.json()
-
-
-# ============================================================
-# PING
-# ============================================================
-
-def ping():
-
-    return public_get(
-        "/fapi/v3/ping"
-    )
-
-
-# ============================================================
-# SERVER TIME
-# ============================================================
-
-def get_server_time():
-
-    return public_get(
-        "/fapi/v3/time"
-    )
-
-
-# ============================================================
-# EXCHANGE INFO
-# ============================================================
-
-def get_exchange_info():
-
-    return public_get(
-        "/fapi/v3/exchangeInfo"
-    )
-
-
-# ============================================================
-# BALANCE
-# ============================================================
-
-def get_balance():
-
-    return signed_get(
-        "/fapi/v3/balance"
-    )
-
-
-# ============================================================
-# POSITIONS
-# ============================================================
-
-def get_positions():
-
-    return signed_get(
-        "/fapi/v3/positionRisk"
-    )
-
-
-# ============================================================
-# KLINES
-# ============================================================
-
-def get_klines(
-    symbol="BTCUSDT",
-    interval="1m",
-    limit=100
-):
-
-    return public_get(
-        "/fapi/v3/klines",
-        {
-            "symbol": symbol,
-            "interval": interval,
-            "limit": limit
-        }
-    )
-
-
-# ============================================================
-# SIGNAL
-# ============================================================
-
-def calculate_signal(klines):
-
-    if len(klines) < 20:
-        return "WAIT"
-
-    closes = [
-        float(candle[4])
-        for candle in klines
-    ]
-
-    fast_ma = sum(closes[-5:]) / 5
-    slow_ma = sum(closes[-20:]) / 20
-
-    if fast_ma > slow_ma:
-        return "BUY"
-
-    if fast_ma < slow_ma:
-        return "SELL"
-
-    return "WAIT"
-
-
-# ============================================================
-# MAIN
-# ============================================================
-
-def main():
-
-    print("=" * 60)
-    print("ASTER FUTURES V3 TESTNET BOT")
-    print("=" * 60)
-
-    validate_credentials()
-
-    print("\nTesting connection...")
-
-    print(
-        "PING:",
-        ping()
-    )
-
-    server = get_server_time()
-
-    print(
-        "SERVER TIME:",
-        server
-    )
-
-    print(
-        "\nLoading exchange info..."
-    )
-
-    exchange = get_exchange_info()
-
-    symbols = {
-        item["symbol"]
-        for item in exchange.get(
-            "symbols",
-            []
-        )
+    params = {
+        "user": USER_ADDRESS,
+        "signer": API_WALLET,
+        "nonce": nonce,
     }
 
-    if "BTCUSDT" not in symbols:
+    # IMPORTANT:
+    # The exact query string below is what gets signed.
+    query_string = canonical_query(params)
 
-        raise RuntimeError(
-            "BTCUSDT is not available "
-            "on Futures Testnet"
+    signature = sign_message(query_string)
+
+    final_query = query_string + "&signature=" + urllib.parse.quote(
+        signature,
+        safe=""
+    )
+
+    url = f"{BASE_URL}/fapi/v3/agent?{final_query}"
+
+    print("\nUSER:")
+    print(USER_ADDRESS)
+
+    print("\nSIGNER:")
+    print(API_WALLET)
+
+    print("\nCHAIN ID:")
+    print(CHAIN_ID)
+
+    print("\nSIGNED QUERY:")
+    print(query_string)
+
+    print("\nCalling:")
+    print("GET /fapi/v3/agent")
+
+    try:
+        response = requests.get(
+            url,
+            timeout=20,
+            headers={
+                "User-Agent": "Aster-Testnet-Agent-Diagnostic/1.0"
+            }
+        )
+    except requests.RequestException as e:
+        fail(f"Network error:\n{e}")
+
+    print("\nHTTP STATUS:")
+    print(response.status_code)
+
+    print("\nRAW RESPONSE:")
+    print(response.text)
+
+    if response.status_code != 200:
+        print("\n========================================")
+        print("AGENT CHECK FAILED")
+        print("========================================")
+        print("The Testnet API did not accept the Agent query.")
+        return
+
+    try:
+        data = response.json()
+    except ValueError:
+        print("\nResponse was not valid JSON.")
+        return
+
+    print("\n========================================")
+    print("AGENT CHECK RESULT")
+    print("========================================")
+
+    if not isinstance(data, list):
+        print(data)
+        return
+
+    if len(data) == 0:
+        print("No authorized agents were returned.")
+        print("\nThis means the Testnet API did not return any")
+        print("authorized Agent for this user.")
+        return
+
+    print(f"Authorized agents returned: {len(data)}")
+
+    found = False
+
+    for index, agent in enumerate(data, start=1):
+        print(f"\n--- Agent {index} ---")
+
+        print("Address:", agent.get("agentAddress"))
+        print("Name:", agent.get("agentName"))
+        print("Read:", agent.get("canRead"))
+        print("Perp:", agent.get("canPerpTrade"))
+        print("Spot:", agent.get("canSpotTrade"))
+        print("Withdraw:", agent.get("canWithdraw"))
+        print("IP:", agent.get("ipWhitelist"))
+        print("Expired:", agent.get("expired"))
+        print("Source:", agent.get("source"))
+
+        agent_address = agent.get("agentAddress", "")
+
+        if normalize_address(agent_address) == normalize_address(API_WALLET):
+            found = True
+
+            print("\n>>> THIS IS OUR API WALLET <<<")
+
+            if agent.get("canPerpTrade") is True:
+                print(">>> Perp trading permission: YES")
+            else:
+                print(">>> Perp trading permission: NO")
+
+    print("\n========================================")
+
+    if found:
+        print("RESULT: OUR SIGNER WAS FOUND")
+        print("========================================")
+        print(
+            "The Testnet API recognizes our signer as an Agent."
+        )
+    else:
+        print("RESULT: OUR SIGNER WAS NOT FOUND")
+        print("========================================")
+        print(
+            "The Testnet API did not return our signer "
+            "as an authorized Agent."
         )
 
-    print("BTCUSDT: OK")
 
-    print(
-        "\nLoading balance..."
-    )
+def main():
+    print("ASTER FUTURES V3 TESTNET")
+    print("AGENT DIAGNOSTIC - NO TRADING")
 
-    balance = get_balance()
+    if not API_WALLET:
+        fail("ASTER_API_WALLET is missing.")
 
-    print("BALANCE:")
-    print(balance)
+    if not PRIVATE_KEY:
+        fail("ASTER_API_PRIVATE_KEY is missing.")
 
-    print(
-        "\nLoading positions..."
-    )
+    if not USER_ADDRESS:
+        fail("ASTER_USER_ADDRESS is missing.")
 
-    positions = get_positions()
+    validate_address("ASTER_API_WALLET", API_WALLET)
+    validate_address("ASTER_USER_ADDRESS", USER_ADDRESS)
 
-    print("POSITIONS:")
-    print(positions)
+    # Verify that the private key actually belongs to API_WALLET.
+    try:
+        derived_address = Account.from_key(PRIVATE_KEY).address
+    except Exception as e:
+        fail(f"Could not load API private key:\n{e}")
 
-    print(
-        "\nBOT IS RUNNING"
-    )
+    print("\nConfigured API wallet:")
+    print(API_WALLET)
 
-    print("-" * 60)
+    print("\nDerived signer from private key:")
+    print(derived_address)
 
-    while True:
+    if normalize_address(derived_address) != normalize_address(API_WALLET):
+        fail(
+            "\nPRIVATE KEY / API WALLET MISMATCH.\n"
+            "The private key in Railway does not belong to "
+            "ASTER_API_WALLET."
+        )
 
-        try:
+    print("\nSigner check: OK")
 
-            klines = get_klines(
-                symbol="BTCUSDT",
-                interval="1m",
-                limit=100
-            )
+    get_agents()
 
-            last_price = float(
-                klines[-1][4]
-            )
-
-            signal = calculate_signal(
-                klines
-            )
-
-            print(
-                f"BTCUSDT | "
-                f"Price: {last_price} | "
-                f"Signal: {signal}"
-            )
-
-            time.sleep(30)
-
-        except Exception as e:
-
-            print(
-                "LOOP ERROR:",
-                e
-            )
-
-            time.sleep(30)
-
-
-# ============================================================
-# START
-# ============================================================
 
 if __name__ == "__main__":
     main()
