@@ -151,7 +151,13 @@ def sign_params(params):
         private_key=PRIVATE_KEY
     )
 
-    return encoded, signed.signature.hex()
+    signature = bytearray(signed.signature)
+
+    # Aster V3 expects EIP-712 v = 27/28
+    if signature[64] in (0, 1):
+        signature[64] += 27
+
+    return encoded, "0x" + bytes(signature).hex()
 
 
 # ============================================================
