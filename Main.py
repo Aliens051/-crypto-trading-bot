@@ -2,10 +2,8 @@ import os
 import time
 import urllib.parse
 import requests
-
 from eth_account import Account
 from eth_account.messages import encode_typed_data
-
 
 BASE_URL = "https://fapi.asterdex-testnet.com"
 
@@ -27,59 +25,53 @@ if signer.lower() != API_WALLET.lower():
         f"API private key mismatch: derived={signer}, wallet={API_WALLET}"
     )
 
-
 session = requests.Session()
 
-session.headers.update({
-    "Content-Type": "application/x-www-form-urlencoded",
-    "User-Agent": "PythonApp/1.0",
-})
+DOMAIN = {
+    "name": "AsterSignTransaction",
+    "version": "1",
+    "chainId": 1666,
+    "verifyingContract": "0x0000000000000000000000000000000000000000",
+}
 
-
-TYPED_DATA = {
-    "types": {
-        "EIP712Domain": [
-            {"name": "name", "type": "string"},
-            {"name": "version", "type": "string"},
-            {"name": "chainId", "type": "uint256"},
-            {"name": "verifyingContract", "type": "address"},
-        ],
-        "Message": [
-            {"name": "msg", "type": "string"},
-        ],
-    },
-    "primaryType": "Message",
-    "domain": {
-        "name": "AsterSignTransaction",
-        "version": "1",
-        "chainId": 1666,
-        "verifyingContract": "0x0000000000000000000000000000000000000000",
-    },
-    "message": {
-        "msg": "",
-    },
+TYPES = {
+    "EIP712Domain": [
+        {"name": "name", "type": "string"},
+        {"name": "version", "type": "string"},
+        {"name": "chainId", "type": "uint256"},
+        {"name": "verifyingContract", "type": "address"},
+    ],
+    "Message": [
+        {"name": "msg", "type": "string"},
+    ],
 }
 
 
-def get_nonce():
+def nonce():
     return int(time.time() * 1_000_000)
 
 
 def sign_params(params):
     params = dict(params)
 
-    params["nonce"] = str(get_nonce())
+    params["nonce"] = str(nonce())
     params["signer"] = API_WALLET
 
-    encoded = urllib.parse.urlencode(params)
+    query = urllib.parse.urlencode(params)
 
-    typed_data = dict(TYPED_DATA)
-    typed_data["message"] = {"msg": encoded}
+    typed_data = {
+        "types": TYPES,
+        "primaryType": "Message",
+        "domain": DOMAIN,
+        "message": {
+            "msg": query,
+        },
+    }
 
-    message = encode_typed_data(full_message=typed_data)
+    encoded = encode_typed_data(full_message=typed_data)
 
     signed = Account.sign_message(
-        message,
+        encoded,
         private_key=PRIVATE_KEY,
     )
 
@@ -89,43 +81,38 @@ def sign_params(params):
 
 
 def public_get(path, params=None):
-    response = session.get(
+    r = session.get(
         BASE_URL + path,
         params=params or {},
         timeout=20,
     )
 
-    print("PUBLIC:", path, response.status_code)
-    print(response.text)
+    print("PUBLIC", path, r.status_code, r.text)
 
-    response.raise_for_status()
-
-    return response.json()
+    r.raise_for_status()
+    return r.json()
 
 
 def signed_get(path, params=None):
     signed = sign_params(params or {})
 
-    response = session.get(
+    r = session.get(
         BASE_URL + path,
         params=signed,
         timeout=20,
     )
 
-    print("SIGNED:", path, response.status_code)
-    print(response.text)
+    print("SIGNED", path, r.status_code, r.text)
 
-    response.raise_for_status()
-
-    return response.json()
+    r.raise_for_status()
+    return r.json()
 
 
 def test_connection():
     public_get("/fapi/v3/ping")
-    print("ASTER CONNECTION OK")
 
 
-def get_time():
+def get_server_time():
     return public_get("/fapi/v3/time")
 
 
@@ -134,44 +121,51 @@ def get_exchange_info():
 
 
 def get_balance():
-    return signed_get("/fapi/v3/balance")
+    return signed_get(
+        "/fapi/v3/balance",
+        {}
+    )
 
 
 def get_positions():
-    return signed_get("/fapi/v3/positionRisk")
+    return signed_get(
+        "/fapi/v3/positionRisk",
+        {}
+    )
 
 
-def get_klines(symbol="BTCUSDT", interval="5m", limit=100):
+def get_klines():
     return public_get(
         "/fapi/v3/klines",
         {
-            "symbol": symbol,
-            "interval": interval,
-            "limit": limit,
+            "symbol": "BTCUSDT",
+            "interval": "5m",
+            "limit": 100,
         },
     )
 
 
 def main():
+    print("TEST CONNECTION")
     test_connection()
 
-    print("SERVER TIME:")
-    get_time()
+    print("SERVER TIME")
+    get_server_time()
 
-    print("EXCHANGE INFO:")
+    print("EXCHANGE INFO")
     get_exchange_info()
 
-    print("BALANCE:")
+    print("BALANCE")
     get_balance()
 
-    print("POSITIONS:")
+    print("POSITIONS")
     get_positions()
 
-    print("BTCUSDT KLINES:")
+    print("KLINES")
     get_klines()
 
     print("==============================================")
-    print("ASTER FUTURES V3 TESTNET AUTH CHECK")
+    print("ASTER V3 TESTNET AUTH CHECK PASSED")
     print("==============================================")
 
     while True:
