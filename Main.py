@@ -15,6 +15,7 @@ BASE_URL = "https://fapi.asterdex-testnet.com"
 
 API_WALLET = os.getenv("ASTER_API_WALLET", "").strip()
 PRIVATE_KEY = os.getenv("ASTER_API_PRIVATE_KEY", "").strip()
+USER_ADDRESS = os.getenv("ASTER_USER_ADDRESS", "").strip()
 
 
 # ============================================================
@@ -24,7 +25,7 @@ PRIVATE_KEY = os.getenv("ASTER_API_PRIVATE_KEY", "").strip()
 DOMAIN = {
     "name": "AsterSignTransaction",
     "version": "1",
-    "chainId": 714,
+    "chainId": 1666,
     "verifyingContract": "0x0000000000000000000000000000000000000000",
 }
 
@@ -69,6 +70,28 @@ def validate_credentials():
             "ASTER_API_PRIVATE_KEY is missing"
         )
 
+    if not USER_ADDRESS:
+        raise RuntimeError(
+            "ASTER_USER_ADDRESS is missing"
+        )
+
+    # Validate user address format
+    if (
+        not USER_ADDRESS.startswith("0x")
+        or len(USER_ADDRESS) != 42
+    ):
+        raise RuntimeError(
+            "ASTER_USER_ADDRESS must be a valid "
+            "20-byte EVM address"
+        )
+
+    try:
+        int(USER_ADDRESS[2:], 16)
+    except ValueError:
+        raise RuntimeError(
+            "ASTER_USER_ADDRESS contains invalid hex characters"
+        )
+
     try:
         account = Account.from_key(PRIVATE_KEY)
 
@@ -87,6 +110,7 @@ def validate_credentials():
         )
 
     print("Credential check: OK")
+    print("User:", USER_ADDRESS)
     print("Signer:", API_WALLET)
 
 
@@ -118,19 +142,47 @@ def get_nonce():
 
 
 # ============================================================
+# PARAMETER STRING
+# ============================================================
+
+def build_param_string(params):
+
+    # Aster V3:
+    # - all values as strings
+    # - ASCII-sort parameter names
+    # - exact resulting string is signed
+
+    normalized = {}
+
+    for key, value in params.items():
+        normalized[str(key)] = str(value)
+
+    sorted_items = sorted(
+        normalized.items(),
+        key=lambda item: item[0]
+    )
+
+    return urllib.parse.urlencode(
+        sorted_items
+    )
+
+
+# ============================================================
 # EIP-712 SIGNATURE
 # ============================================================
 
 def sign_params(params):
 
-    encoded = urllib.parse.urlencode(params)
+    param_string = build_param_string(
+        params
+    )
 
     typed_data = {
         "types": TYPES,
         "primaryType": "Message",
         "domain": DOMAIN,
         "message": {
-            "msg": encoded
+            "msg": param_string
         },
     }
 
@@ -143,13 +195,11 @@ def sign_params(params):
         private_key=PRIVATE_KEY
     )
 
-    signature = bytearray(signed.signature)
+    # Official Aster format:
+    # signed.signature.hex()
+    signature = signed.signature.hex()
 
-    # Aster V3 expects recovery id v = 27 / 28
-    if signature[64] in (0, 1):
-        signature[64] += 27
-
-    return encoded, bytes(signature).hex()
+    return param_string, signature
 
 
 # ============================================================
@@ -182,24 +232,33 @@ def signed_get(path, params=None):
     if params is None:
         params = {}
 
-    params = dict(params)
+    request_params = dict(params)
 
-    # Official V3 authentication
-    params["nonce"] = str(get_nonce())
-    params["signer"] = API_WALLET
+    # Official V3 authentication fields
+    request_params["user"] = USER_ADDRESS
+    request_params["signer"] = API_WALLET
+    request_params["nonce"] = str(
+        get_nonce()
+    )
 
-    encoded, signature = sign_params(params)
+    # IMPORTANT:
+    # The exact same sorted/encoded string
+    # must be signed and sent before signature.
+    param_string, signature = sign_params(
+        request_params
+    )
 
     url = (
         BASE_URL
         + path
         + "?"
-        + encoded
+        + param_string
         + "&signature="
         + signature
     )
 
     print("SIGNED:", path)
+    print("MSG:", param_string)
 
     response = session.get(
         url,
@@ -207,9 +266,12 @@ def signed_get(path, params=None):
     )
 
     if not response.ok:
+
         print("ASTER ERROR:")
         print(response.text)
-        print("URL:", url)
+
+        print("URL:")
+        print(url)
 
     response.raise_for_status()
 
@@ -256,12 +318,7 @@ def get_exchange_info():
 def get_balance():
 
     return signed_get(
-        "/fapi/v3/balance",
-        {
-            "timestamp": int(
-                time.time() * 1000
-            )
-        }
+        "/fapi/v3/balance"
     )
 
 
@@ -272,12 +329,7 @@ def get_balance():
 def get_positions():
 
     return signed_get(
-        "/fapi/v3/positionRisk",
-        {
-            "timestamp": int(
-                time.time() * 1000
-            )
-        }
+        "/fapi/v3/positionRisk"
     )
 
 
