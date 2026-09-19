@@ -28,16 +28,13 @@ DOMAIN = {
     "verifyingContract": "0x0000000000000000000000000000000000000000",
 }
 
-TYPES = {
-    "EIP712Domain": [
-        {"name": "name", "type": "string"},
-        {"name": "version", "type": "string"},
-        {"name": "chainId", "type": "uint256"},
-        {"name": "verifyingContract", "type": "address"},
-    ],
+MESSAGE_TYPES = {
     "Message": [
-        {"name": "msg", "type": "string"},
-    ],
+        {
+            "name": "msg",
+            "type": "string"
+        }
+    ]
 }
 
 
@@ -94,27 +91,10 @@ def validate_credentials():
 # NONCE
 # ============================================================
 
-_last_second = 0
-_nonce_counter = 0
-
-
 def get_nonce():
 
-    global _last_second
-    global _nonce_counter
-
-    now_second = int(time.time())
-
-    if now_second == _last_second:
-        _nonce_counter += 1
-
-    else:
-        _last_second = now_second
-        _nonce_counter = 0
-
-    return (
-        now_second * 1_000_000
-        + _nonce_counter
+    return int(
+        time.time() * 1_000_000
     )
 
 
@@ -124,27 +104,27 @@ def get_nonce():
 
 def sign_params(params):
 
-    encoded = urllib.parse.urlencode(params)
+    encoded = urllib.parse.urlencode(
+        params
+    )
 
-    typed_data = {
-        "types": TYPES,
-        "primaryType": "Message",
-        "domain": DOMAIN,
-        "message": {
+    signable = encode_typed_data(
+        domain_data=DOMAIN,
+        message_types=MESSAGE_TYPES,
+        message_data={
             "msg": encoded
-        },
-    }
-
-    message = encode_typed_data(
-        full_message=typed_data
+        }
     )
 
     signed = Account.sign_message(
-        message,
+        signable,
         private_key=PRIVATE_KEY
     )
 
-    return encoded, signed.signature.hex()
+    return (
+        encoded,
+        signed.signature.hex()
+    )
 
 
 # ============================================================
@@ -160,6 +140,7 @@ def public_get(path, params=None):
     )
 
     if not response.ok:
+
         print("ASTER PUBLIC ERROR:")
         print(response.text)
 
@@ -179,10 +160,15 @@ def signed_get(path, params=None):
 
     params = dict(params)
 
-    params["nonce"] = str(get_nonce())
+    params["nonce"] = str(
+        get_nonce()
+    )
+
     params["signer"] = API_WALLET
 
-    encoded, signature = sign_params(params)
+    encoded, signature = sign_params(
+        params
+    )
 
     url = (
         BASE_URL
@@ -201,6 +187,7 @@ def signed_get(path, params=None):
     )
 
     if not response.ok:
+
         print("ASTER ERROR:")
         print(response.text)
         print("URL:", url)
@@ -260,7 +247,7 @@ def get_balance():
 
 
 # ============================================================
-# POSITION
+# POSITIONS
 # ============================================================
 
 def get_positions():
@@ -309,8 +296,13 @@ def calculate_signal(klines):
         for candle in klines
     ]
 
-    fast_ma = sum(closes[-5:]) / 5
-    slow_ma = sum(closes[-20:]) / 20
+    fast_ma = (
+        sum(closes[-5:]) / 5
+    )
+
+    slow_ma = (
+        sum(closes[-20:]) / 20
+    )
 
     if fast_ma > slow_ma:
         return "BUY"
@@ -340,9 +332,11 @@ def main():
         ping()
     )
 
+    server = get_server_time()
+
     print(
         "SERVER TIME:",
-        get_server_time()
+        server
     )
 
     print(
@@ -360,6 +354,7 @@ def main():
     }
 
     if "BTCUSDT" not in symbols:
+
         raise RuntimeError(
             "BTCUSDT is not available "
             "on Futures Testnet"
@@ -426,6 +421,10 @@ def main():
 
             time.sleep(30)
 
+
+# ============================================================
+# START
+# ============================================================
 
 if __name__ == "__main__":
     main()
