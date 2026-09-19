@@ -13,7 +13,6 @@ from eth_account.messages import encode_typed_data
 
 BASE_URL = "https://fapi.asterdex-testnet.com"
 
-USER = os.getenv("ASTER_USER_ADDRESS", "").strip()
 API_WALLET = os.getenv("ASTER_API_WALLET", "").strip()
 PRIVATE_KEY = os.getenv("ASTER_API_PRIVATE_KEY", "").strip()
 
@@ -60,11 +59,6 @@ session.headers.update({
 
 def validate_credentials():
 
-    if not USER:
-        raise RuntimeError(
-            "ASTER_USER_ADDRESS is missing"
-        )
-
     if not API_WALLET:
         raise RuntimeError(
             "ASTER_API_WALLET is missing"
@@ -93,7 +87,6 @@ def validate_credentials():
         )
 
     print("Credential check: OK")
-    print("User:", USER)
     print("Signer:", API_WALLET)
 
 
@@ -167,7 +160,6 @@ def public_get(path, params=None):
     )
 
     if not response.ok:
-
         print("ASTER PUBLIC ERROR:")
         print(response.text)
 
@@ -187,8 +179,6 @@ def signed_get(path, params=None):
 
     params = dict(params)
 
-    # Official Aster V3 authentication:
-    # nonce + signer
     params["nonce"] = str(get_nonce())
     params["signer"] = API_WALLET
 
@@ -211,7 +201,6 @@ def signed_get(path, params=None):
     )
 
     if not response.ok:
-
         print("ASTER ERROR:")
         print(response.text)
         print("URL:", url)
@@ -261,7 +250,12 @@ def get_exchange_info():
 def get_balance():
 
     return signed_get(
-        "/fapi/v3/balance"
+        "/fapi/v3/balance",
+        {
+            "timestamp": int(
+                time.time() * 1000
+            )
+        }
     )
 
 
@@ -272,7 +266,12 @@ def get_balance():
 def get_positions():
 
     return signed_get(
-        "/fapi/v3/positionRisk"
+        "/fapi/v3/positionRisk",
+        {
+            "timestamp": int(
+                time.time() * 1000
+            )
+        }
     )
 
 
@@ -310,13 +309,8 @@ def calculate_signal(klines):
         for candle in klines
     ]
 
-    fast_ma = (
-        sum(closes[-5:]) / 5
-    )
-
-    slow_ma = (
-        sum(closes[-20:]) / 20
-    )
+    fast_ma = sum(closes[-5:]) / 5
+    slow_ma = sum(closes[-20:]) / 20
 
     if fast_ma > slow_ma:
         return "BUY"
@@ -346,11 +340,9 @@ def main():
         ping()
     )
 
-    server = get_server_time()
-
     print(
         "SERVER TIME:",
-        server
+        get_server_time()
     )
 
     print(
@@ -368,7 +360,6 @@ def main():
     }
 
     if "BTCUSDT" not in symbols:
-
         raise RuntimeError(
             "BTCUSDT is not available "
             "on Futures Testnet"
@@ -435,10 +426,6 @@ def main():
 
             time.sleep(30)
 
-
-# ============================================================
-# START
-# ============================================================
 
 if __name__ == "__main__":
     main()
