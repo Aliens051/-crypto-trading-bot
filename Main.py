@@ -187,6 +187,8 @@ def signed_get(path, params=None):
 
     params = dict(params)
 
+    # Official Aster V3 authentication:
+    # nonce + signer
     params["nonce"] = str(get_nonce())
     params["signer"] = API_WALLET
 
@@ -212,6 +214,7 @@ def signed_get(path, params=None):
 
         print("ASTER ERROR:")
         print(response.text)
+        print("URL:", url)
 
     response.raise_for_status()
 
@@ -258,12 +261,7 @@ def get_exchange_info():
 def get_balance():
 
     return signed_get(
-        "/fapi/v3/balance",
-        {
-            "timestamp": int(
-                time.time() * 1000
-            )
-        }
+        "/fapi/v3/balance"
     )
 
 
@@ -274,12 +272,7 @@ def get_balance():
 def get_positions():
 
     return signed_get(
-        "/fapi/v3/positionRisk",
-        {
-            "timestamp": int(
-                time.time() * 1000
-            )
-        }
+        "/fapi/v3/positionRisk"
     )
 
 
